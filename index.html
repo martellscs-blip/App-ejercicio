@@ -1,0 +1,989 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>MODO BESTIA</title>
+  <meta name="description" content="Entrenamiento de fuerza sincronizado con Strava, con estadisticas de valor." />
+  <meta name="theme-color" content="#08090B" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png" />
+  <link rel="apple-touch-icon" href="icon-192.png" />
+  <style>
+    html, body { margin: 0; padding: 0; background: #08090B; }
+    #cargando { min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      color: #4C7EDB; font-family: sans-serif; letter-spacing: 3px; font-size: 14px; }
+  </style>
+  <script>
+    (function () {
+      const avisoOriginal = console.warn;
+      console.warn = function (...args) {
+        if (String(args[0]).includes("in-browser Babel transformer")) return;
+        avisoOriginal.apply(console, args);
+      };
+      window.addEventListener("error", function (e) { console.error("Error capturado:", e.error || e.message); });
+      window.addEventListener("unhandledrejection", function (e) { console.error("Promesa rechazada:", e.reason); });
+    })();
+  </script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.4/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"><div id="cargando">MODO BESTIA</div></div>
+  <script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo } = React;
+
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) { console.error("Error capturado:", error, info); }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ minHeight: "100vh", background: "#08090B", color: "#E6E8EC", display: "flex",
+          flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: "sans-serif",
+          padding: 24, textAlign: "center", gap: 14 }}>
+          <div style={{ fontSize: 15 }}>Algo no cargo bien. Tus datos guardados siguen a salvo.</div>
+          <button onClick={() => window.location.reload()} style={{ background: "#4C7EDB", color: "#0A0E16",
+            border: "none", borderRadius: 10, padding: "10px 20px", fontWeight: 600, cursor: "pointer", fontSize: 14 }}>
+            Recargar
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// ============ TU SEMANA (plan por defecto — puedes reordenarla en la app) ============
+const PLAN_DEFAULT = {
+  1: "Pecho y Bíceps",
+  2: "Espalda y Tríceps",
+  3: "Pierna Completa",
+  4: "Hombros, Trapecio y Antebrazo",
+  5: "Pierna Completa + Cardio",
+  6: "Cardio",
+  0: "Cardio",
+};
+// Sube este número cada vez que se edite PLAN_DEFAULT desde el chat.
+// Así, la próxima vez que abras la app, tu semana se corrige sola —
+// sin pisar un reordenamiento que tú hayas hecho a mano después.
+const PLAN_VERSION = 2;
+
+// ============ STRAVA — misma app que ya usa Runner (mismo dominio, mismo Client ID) ============
+const STRAVA_CLIENT_ID = "273128";
+const STRAVA_CLIENT_SECRET = "d6c812b645e4d0c62d0587c3cc2f4b0cdbd28c55";
+// Tipos de actividad de Strava que cuentan como entrenamiento de fuerza.
+// Se excluye a propósito: Run, Ride, Swim, Walk, Hike (esos ya los sigues en Runner).
+const STRAVA_TIPOS_FUERZA = ["WeightTraining", "Workout", "Crossfit"];
+
+// ============ GOOGLE DRIVE — ID de cliente ya configurado, no es secreto ============
+const GDRIVE_CLIENT_ID_DEFAULT = "1005268713457-e4qphu803fs0u6djc7k632pjb38k3oka.apps.googleusercontent.com";
+
+const DIAS = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
+const MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+
+const STORAGE_KEY = "fierro-data-v2"; // misma llave: tu historial se conserva
+
+// Adaptador de almacenamiento: usa window.storage (entorno de Claude) si existe;
+// en hosting externo (GitHub Pages, Vercel, etc.) usa localStorage del navegador.
+// Adaptador de almacenamiento: localStorage es SIEMPRE la base confiable
+// (funciona igual en GitHub Pages, Opera, o dentro de Claude). Si además existe
+// window.storage (solo dentro de Claude), se usa como copia extra, pero si esa
+// API interna falla, nunca bloquea ni rompe el guardado real en localStorage.
+const storage = {
+  async get(k) {
+    try {
+      const v = localStorage.getItem(k);
+      if (v !== null) return { value: v };
+    } catch (e) { /* localStorage no disponible en este navegador */ }
+    if (typeof window !== "undefined" && window.storage) {
+      try { return await window.storage.get(k); } catch (e) { /* sin datos previos ahí tampoco */ }
+    }
+    throw new Error("sin datos previos");
+  },
+  async set(k, v) {
+    let guardadoOk = false;
+    try { localStorage.setItem(k, v); guardadoOk = true; } catch (e) { /* localStorage no disponible */ }
+    if (typeof window !== "undefined" && window.storage) {
+      try { await window.storage.set(k, v); guardadoOk = true; } catch (e) { /* falla silenciosa, no crítica */ }
+    }
+    if (!guardadoOk) throw new Error("No hay almacenamiento disponible en este navegador");
+    return { key: k, value: v };
+  },
+};
+const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const hoyISO = () => iso(new Date());
+const fechaCorta = (s) => new Date(s + "T12:00:00").toLocaleDateString("es-MX", { day: "numeric", month: "short" });
+const diaCorta = (s) => new Date(s + "T12:00:00").toLocaleDateString("es-MX", { weekday: "short", day: "numeric" });
+
+// "20 ago, 08:18 a.m." — fecha y hora exactas de la última sincronización
+const fechaHoraCorta = (isoDateTime) => {
+  if (!isoDateTime) return "";
+  return new Date(isoDateTime).toLocaleString("es-MX", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
+};
+
+// Semanas del MES en curso, en bloques de 7 días (1-7, 8-14, ...).
+// Se recalcula solo con año/mes reales: al cambiar de mes, cambia sola.
+function semanasDelMes(anio, mes) {
+  const ultimoDia = new Date(anio, mes + 1, 0).getDate();
+  const semanas = [];
+  for (let inicio = 1; inicio <= ultimoDia; inicio += 7) {
+    const fin = Math.min(inicio + 6, ultimoDia);
+    const dias = [];
+    for (let d = inicio; d <= fin; d++) dias.push(`${anio}-${String(mes + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`);
+    semanas.push({ dias });
+  }
+  return semanas;
+}
+
+function ModoBestia() {
+  const [tab, setTab] = useState("hoy");
+  const [data, setData] = useState({ diasMarcados: [], plan: PLAN_DEFAULT, planVersion: PLAN_VERSION, planOverrides: {}, strava: { accessToken: null, refreshToken: null, expiresAt: null, ultimaSync: null }, stravaActividades: [] });
+  const [drag, setDrag] = useState(null); // {from, y0} para reordenar la semana
+  const [cargado, setCargado] = useState(false);
+  const [mensaje, setMensaje] = useState(null);
+  const [mesCal, setMesCal] = useState(() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; });
+  const [sincronizando, setSincronizando] = useState(false);
+  const [semanaSel, setSemanaSel] = useState(() => Math.floor((new Date().getDate() - 1) / 7));
+  const [editandoDia, setEditandoDia] = useState(null); // fecha de la fila que se está editando
+  const [editandoTexto, setEditandoTexto] = useState("");
+  const [gdriveClientId, setGdriveClientId] = useState(() => {
+    try {
+      const v = (localStorage.getItem("gdrive_client_id") || "").trim();
+      return v || GDRIVE_CLIENT_ID_DEFAULT;
+    } catch (e) { return GDRIVE_CLIENT_ID_DEFAULT; }
+  });
+  const [configurandoDrive, setConfigurandoDrive] = useState(false);
+  const [gdriveInput, setGdriveInput] = useState("");
+  const [guardandoDrive, setGuardandoDrive] = useState(false);
+  const diaSemanaHoy = new Date().getDay();
+
+  useEffect(() => {
+    (async () => {
+      let dataInicial = null;
+      try {
+        const r = await storage.get(STORAGE_KEY);
+        if (r && r.value) {
+          const d = JSON.parse(r.value);
+          const versionGuardada = d.planVersion || 0;
+          const planFinal = versionGuardada < PLAN_VERSION ? { ...PLAN_DEFAULT } : { ...PLAN_DEFAULT, ...(d.plan || {}) };
+          dataInicial = {
+            diasMarcados: d.diasMarcados || [],
+            plan: planFinal,
+            planVersion: PLAN_VERSION,
+            planOverrides: d.planOverrides && typeof d.planOverrides === "object" ? d.planOverrides : {},
+            strava: d.strava && typeof d.strava === "object" ? d.strava : { accessToken: null, refreshToken: null, expiresAt: null, ultimaSync: null },
+            stravaActividades: Array.isArray(d.stravaActividades) ? d.stravaActividades : [],
+          };
+        }
+      } catch (e) { /* primera vez */ }
+
+      // ¿Strava nos acaba de regresar aquí con un código de autorización?
+      const codeParam = new URLSearchParams(window.location.search).get("code");
+      if (codeParam) {
+        window.history.replaceState(null, "", window.location.pathname);
+        if (!dataInicial) dataInicial = { diasMarcados: [], plan: { ...PLAN_DEFAULT }, planVersion: PLAN_VERSION, planOverrides: {}, strava: { accessToken: null, refreshToken: null, expiresAt: null, ultimaSync: null }, stravaActividades: [] };
+        setMensaje("Conectando con Strava...");
+        setData(dataInicial);
+        setCargado(true);
+        await exchangeStravaCode(codeParam, dataInicial);
+        return;
+      }
+
+      if (dataInicial) setData(dataInicial);
+      setCargado(true);
+
+      // Sincronización silenciosa: si ya hay conexión guardada, jala lo nuevo sin pedir nada.
+      if (dataInicial && dataInicial.strava && dataInicial.strava.refreshToken) {
+        sincronizarStrava(dataInicial);
+      }
+    })();
+  }, []);
+
+  const guardar = async (nueva) => {
+    setData(nueva);
+    try { await storage.set(STORAGE_KEY, JSON.stringify(nueva)); }
+    catch (e) { console.error("No se pudo guardar", e); }
+  };
+
+  // ---------- rachas ----------
+  const rachas = useMemo(() => {
+    const set = new Set(data.diasMarcados);
+    let actual = 0;
+    const d = new Date();
+    if (!set.has(iso(d))) d.setDate(d.getDate() - 1);
+    while (set.has(iso(d))) { actual++; d.setDate(d.getDate() - 1); }
+    const orden = [...set].sort();
+    let mejor = 0, run = 0, prev = null;
+    for (const f of orden) {
+      if (prev) {
+        const p = new Date(prev + "T12:00:00"); p.setDate(p.getDate() + 1);
+        run = iso(p) === f ? run + 1 : 1;
+      } else run = 1;
+      mejor = Math.max(mejor, run);
+      prev = f;
+    }
+    const mesStr = `${mesCal.y}-${String(mesCal.m + 1).padStart(2, "0")}`;
+    const esteMes = data.diasMarcados.filter((f) => f.startsWith(mesStr)).length;
+    let ult7 = 0;
+    for (let i = 0; i < 7; i++) { const x = new Date(); x.setDate(x.getDate() - i); if (set.has(iso(x))) ult7++; }
+    return { actual, mejor, esteMes, total: set.size, ult7 };
+  }, [data.diasMarcados, mesCal]);
+
+  // ---------- estadísticas mensuales y del regreso ----------
+  const estad = useMemo(() => {
+    const mesesSet = new Set();
+    data.diasMarcados.forEach((f) => mesesSet.add(f.slice(0, 7)));
+    const meses = [...mesesSet].sort();
+
+    const porMes = meses.map((m) => {
+      const dias = data.diasMarcados.filter((f) => f.startsWith(m)).length;
+      return { mes: m, dias };
+    });
+
+    const conDias = porMes.filter((x) => x.dias > 0);
+    const mejorMes = conDias.length ? conDias.reduce((a, b) => (b.dias >= a.dias ? b : a)) : null;
+    const maxDias = Math.max(1, ...porMes.map((x) => x.dias));
+
+    // ritmo y constancia desde el primer día marcado
+    const marcados = [...data.diasMarcados].sort();
+    let ritmo = null, constancia = null, diasDesde = null;
+    if (marcados.length) {
+      const desde = new Date(marcados[0] + "T12:00:00");
+      diasDesde = Math.max(1, Math.round((new Date() - desde) / 86400000) + 1);
+      ritmo = (data.diasMarcados.length / diasDesde) * 7;
+      constancia = (data.diasMarcados.length / diasDesde) * 100;
+    }
+
+    // mejor semana real (lunes-domingo) por número de días entrenados
+    let mejorSemana = null;
+    if (marcados.length) {
+      const porSemana = {};
+      marcados.forEach((f) => {
+        const d = new Date(f + "T12:00:00");
+        const offsetLunes = (d.getDay() + 6) % 7;
+        d.setDate(d.getDate() - offsetLunes);
+        const clave = iso(d);
+        porSemana[clave] = (porSemana[clave] || 0) + 1;
+      });
+      const entradas = Object.entries(porSemana).sort((a, b) => b[1] - a[1]);
+      if (entradas.length) mejorSemana = { inicio: entradas[0][0], dias: entradas[0][1] };
+    }
+
+    // día de la semana más constante: % de veces entrenado sobre semanas transcurridas
+    let diaConstante = null;
+    if (marcados.length && diasDesde != null) {
+      const semanasTranscurridas = Math.max(1, diasDesde / 7);
+      const porDiaSemana = [0, 0, 0, 0, 0, 0, 0];
+      marcados.forEach((f) => { porDiaSemana[new Date(f + "T12:00:00").getDay()]++; });
+      const tasas = porDiaSemana.map((c, d) => ({ dia: d, tasa: c / semanasTranscurridas }));
+      tasas.sort((a, b) => b.tasa - a.tasa);
+      if (tasas[0].tasa > 0) diaConstante = { dia: tasas[0].dia, pct: Math.min(100, Math.round(tasas[0].tasa * 100)) };
+    }
+
+    return { porMes, mejorMes, maxDias, ritmo, constancia, diasDesde, mejorSemana, diaConstante };
+  }, [data.diasMarcados]);
+
+  const mesLabel = (m) => `${MESES[parseInt(m.slice(5, 7), 10) - 1].slice(0, 3)} ${m.slice(2, 4)}`;
+
+  // ---------- acciones ----------
+  const toggleDiaCal = async (fecha) => {
+    if (fecha > hoyISO()) return;
+    const marcados = data.diasMarcados.includes(fecha)
+      ? data.diasMarcados.filter((f) => f !== fecha)
+      : [...data.diasMarcados, fecha];
+    await guardar({ ...data, diasMarcados: marcados });
+  };
+
+  const guardarMusculoDia = async (fecha, weekday, texto) => {
+    const limpio = (texto || "").trim();
+    if (!limpio) { setEditandoDia(null); return; }
+    // Si esta fecha tenía una excepción de un arrastre anterior, se limpia:
+    // lo que acabas de escribir debe verse en esta fila sí o sí.
+    const nuevosOverrides = { ...data.planOverrides };
+    delete nuevosOverrides[fecha];
+    await guardar({ ...data, plan: { ...data.plan, [weekday]: limpio }, planOverrides: nuevosOverrides });
+    setEditandoDia(null);
+    setMensaje("Grupo muscular actualizado.");
+    setTimeout(() => setMensaje(null), 2500);
+  };
+
+  // ---------- Strava (mismo patrón que ya funciona en Runner) ----------
+  const conectarStrava = () => {
+    const redirectUri = window.location.origin + window.location.pathname;
+    const url = `https://www.strava.com/oauth/authorize?client_id=${STRAVA_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}&approval_prompt=auto&scope=activity:read_all`;
+    window.location.href = url;
+  };
+
+  // Strava nos regresó con ?code=... — lo cambiamos por tokens y arrancamos el primer sync.
+  const exchangeStravaCode = async (code, dataBase) => {
+    try {
+      const res = await fetch("https://www.strava.com/oauth/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_id: STRAVA_CLIENT_ID,
+          client_secret: STRAVA_CLIENT_SECRET,
+          code,
+          grant_type: "authorization_code",
+        }),
+      });
+      if (!res.ok) throw new Error("token exchange failed");
+      const tok = await res.json();
+      const nuevo = {
+        ...dataBase,
+        strava: { accessToken: tok.access_token, refreshToken: tok.refresh_token, expiresAt: tok.expires_at, ultimaSync: null },
+      };
+      await guardar(nuevo);
+      setMensaje("Strava conectado. Sincronizando tus entrenamientos de fuerza...");
+      setTimeout(() => setMensaje(null), 4000);
+      await sincronizarStrava(nuevo);
+    } catch (e) {
+      console.error("Error al conectar con Strava:", e);
+      setMensaje("No se pudo conectar con Strava. Intenta de nuevo.");
+      setTimeout(() => setMensaje(null), 4000);
+    }
+  };
+
+  // Renueva el token si está por vencer (Strava los vence cada 6 horas) y
+  // trae actividades nuevas de fuerza — todo en silencio. Solo marca los DÍAS
+  // (diasMarcados, la misma fuente que racha/estadísticas); el MÚSCULO mostrado
+  // sigue viniendo de tu plan (Strava no sabe qué músculo entrenaste).
+  const sincronizarStrava = async (dataBase) => {
+    const base = dataBase || data;
+    if (!base.strava || !base.strava.refreshToken) return;
+    setSincronizando(true);
+    try {
+      let accessToken = base.strava.accessToken;
+      let refreshToken = base.strava.refreshToken;
+      let expiresAt = base.strava.expiresAt;
+
+      const nowSec = Math.floor(Date.now() / 1000);
+      if (!expiresAt || expiresAt - nowSec <= 300) {
+        const resRefresh = await fetch("https://www.strava.com/oauth/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            client_id: STRAVA_CLIENT_ID,
+            client_secret: STRAVA_CLIENT_SECRET,
+            refresh_token: refreshToken,
+            grant_type: "refresh_token",
+          }),
+        });
+        if (!resRefresh.ok) throw new Error("No se pudo renovar el acceso a Strava");
+        const tok = await resRefresh.json();
+        accessToken = tok.access_token;
+        refreshToken = tok.refresh_token || refreshToken;
+        expiresAt = tok.expires_at;
+      }
+
+      const despuesDe = base.strava.ultimaSync
+        ? Math.floor(new Date(base.strava.ultimaSync).getTime() / 1000) - 86400
+        : Math.floor(Date.now() / 1000) - 90 * 86400;
+      const resAct = await fetch(`https://www.strava.com/api/v3/athlete/activities?after=${despuesDe}&per_page=100`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!resAct.ok) throw new Error("No se pudieron traer las actividades");
+      const actividades = await resAct.json();
+
+      const actsFuerza = (Array.isArray(actividades) ? actividades : [])
+        .filter((a) => STRAVA_TIPOS_FUERZA.includes(a.type || a.sport_type));
+
+      const fechasFuerza = actsFuerza
+        .map((a) => (a.start_date_local || a.start_date || "").slice(0, 10))
+        .filter(Boolean);
+
+      // Guarda duración y esfuerzo (si Strava lo reporta) por actividad, sin duplicar por id.
+      const nuevasDetalladas = actsFuerza.map((a) => ({
+        id: a.id,
+        fecha: (a.start_date_local || a.start_date || "").slice(0, 10),
+        minutos: a.moving_time ? Math.round(a.moving_time / 60) : null,
+        esfuerzo: typeof a.suffer_score === "number" ? a.suffer_score : null,
+        hr: typeof a.average_heartrate === "number" ? Math.round(a.average_heartrate) : null,
+      })).filter((a) => a.id && a.fecha);
+      const idsExistentes = new Set((base.stravaActividades || []).map((a) => a.id));
+      const stravaActividades = [...(base.stravaActividades || []), ...nuevasDetalladas.filter((a) => !idsExistentes.has(a.id))];
+
+      const nuevo = {
+        ...base,
+        diasMarcados: [...new Set([...base.diasMarcados, ...fechasFuerza])],
+        stravaActividades,
+        strava: { accessToken, refreshToken, expiresAt, ultimaSync: new Date().toISOString() },
+      };
+      await guardar(nuevo);
+      if (fechasFuerza.length) {
+        setMensaje(`Strava sincronizado: ${fechasFuerza.length} entrenamiento${fechasFuerza.length === 1 ? "" : "s"} de fuerza detectado${fechasFuerza.length === 1 ? "" : "s"}.`);
+        setTimeout(() => setMensaje(null), 5000);
+      }
+    } catch (e) {
+      console.error("Error al sincronizar con Strava:", e);
+      setMensaje("No se pudo sincronizar con Strava ahora. Se reintenta la próxima vez que abras la app.");
+      setTimeout(() => setMensaje(null), 5000);
+    } finally {
+      setSincronizando(false);
+    }
+  };
+
+  const desconectarStrava = async () => {
+    await guardar({ ...data, strava: { accessToken: null, refreshToken: null, expiresAt: null, ultimaSync: null } });
+    setMensaje("Desconectado de Strava.");
+    setTimeout(() => setMensaje(null), 3000);
+  };
+
+  // ---------- Respaldo en Google Drive (un solo archivo, se actualiza siempre el mismo) ----------
+  const GDRIVE_NOMBRE_ARCHIVO = "Modo Bestia - Respaldo.json";
+
+  const guardarGDriveClientId = () => {
+    const val = (gdriveInput || "").trim();
+    if (!val || !val.includes(".apps.googleusercontent.com")) {
+      setMensaje("Ese ID no se ve válido.");
+      setTimeout(() => setMensaje(null), 3000);
+      return;
+    }
+    try { localStorage.setItem("gdrive_client_id", val); } catch (e) { /* sin localStorage disponible */ }
+    setGdriveClientId(val);
+    setConfigurandoDrive(false);
+    setMensaje('Guardado — ahora toca "Guardar en Google Drive".');
+    setTimeout(() => setMensaje(null), 4000);
+  };
+
+  const getGDriveToken = (clientId) => new Promise((resolve, reject) => {
+    if (!window.google || !window.google.accounts || !window.google.accounts.oauth2) {
+      reject(new Error("Google todavía no cargó — intenta de nuevo"));
+      return;
+    }
+    try {
+      const tokenClient = window.google.accounts.oauth2.initTokenClient({
+        client_id: clientId,
+        scope: "https://www.googleapis.com/auth/drive.file",
+        callback: (resp) => {
+          if (resp && resp.access_token) resolve(resp.access_token);
+          else reject(new Error((resp && resp.error) || "No se pudo conectar con Google"));
+        },
+        error_callback: (err) => {
+          if (err && (err.type === "popup_closed" || err.type === "popup_failed_to_open")) reject(new Error("popup_cerrado"));
+          else reject(new Error("No se pudo conectar con Google"));
+        },
+      });
+      tokenClient.requestAccessToken();
+    } catch (e) { reject(e); }
+  });
+
+  const subirArchivoADrive = async (token, json) => {
+    const q = encodeURIComponent(`name='${GDRIVE_NOMBRE_ARCHIVO}' and trashed=false`);
+    const buscar = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,name)`, {
+      headers: { Authorization: "Bearer " + token },
+    });
+    if (!buscar.ok) throw new Error("No se pudo consultar Google Drive");
+    const encontrados = await buscar.json();
+    const existente = encontrados.files && encontrados.files[0];
+
+    if (existente) {
+      const upd = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${existente.id}?uploadType=media`, {
+        method: "PATCH",
+        headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+        body: json,
+      });
+      if (!upd.ok) throw new Error("No se pudo actualizar el archivo en Drive");
+    } else {
+      const boundary = "boundary_" + Date.now();
+      const metadata = JSON.stringify({ name: GDRIVE_NOMBRE_ARCHIVO, mimeType: "application/json" });
+      const body =
+        "--" + boundary + "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n" + metadata + "\r\n" +
+        "--" + boundary + "\r\nContent-Type: application/json\r\n\r\n" + json + "\r\n" +
+        "--" + boundary + "--";
+      const crear = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", {
+        method: "POST",
+        headers: { Authorization: "Bearer " + token, "Content-Type": "multipart/related; boundary=" + boundary },
+        body,
+      });
+      if (!crear.ok) throw new Error("No se pudo crear el archivo en Drive");
+    }
+  };
+
+  const guardarEnGDrive = async () => {
+    if (!gdriveClientId) { setGdriveInput(""); setConfigurandoDrive(true); return; }
+    setGuardandoDrive(true);
+    try {
+      setMensaje("Conectando con Google…");
+      const token = await getGDriveToken(gdriveClientId);
+      const json = JSON.stringify({ app: "MODO BESTIA", version: 1, exportado: new Date().toISOString(), datos: data }, null, 2);
+      await subirArchivoADrive(token, json);
+      setMensaje("Respaldo guardado en Google Drive.");
+    } catch (err) {
+      if (!(err && err.message === "popup_cerrado")) {
+        setMensaje(err && err.message ? err.message : "No se pudo guardar en Drive.");
+      } else {
+        setMensaje(null);
+      }
+    } finally {
+      setGuardandoDrive(false);
+      setTimeout(() => setMensaje(null), 4000);
+    }
+  };
+
+  // ---------- semana interactiva (reordenar solo la semana que estás viendo) ----------
+  const ROWH = 56; // alto de cada fila para calcular el arrastre
+
+  // Músculo de una fecha: usa la excepción de esa semana si existe;
+  // si no, usa el horario base (recurrente) por día de semana.
+  const obtenerMusculo = (fecha) => {
+    if (data.planOverrides && data.planOverrides[fecha]) return data.planOverrides[fecha];
+    const weekday = new Date(fecha + "T12:00:00").getDay();
+    return data.plan[weekday];
+  };
+
+  // Reordena SOLO las fechas visibles de la semana actual, guardando el
+  // resultado como excepciones — nunca toca el horario base ni otras semanas.
+  const moverPlanVisible = (diasVisibles, from, to) => {
+    const nombres = diasVisibles.map((f) => obtenerMusculo(f));
+    const [item] = nombres.splice(from, 1);
+    nombres.splice(to, 0, item);
+    const nuevosOverrides = { ...data.planOverrides };
+    diasVisibles.forEach((f, i) => { nuevosOverrides[f] = nombres[i]; });
+    return nuevosOverrides;
+  };
+
+  const iniciarDrag = (idx) => (e) => {
+    e.preventDefault();
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) { /* ok */ }
+    setDrag({ from: idx, y0: e.clientY });
+  };
+
+  const moverDrag = (e) => {
+    if (!drag) return;
+    const dy = e.clientY - drag.y0;
+    const shift = Math.round(dy / ROWH);
+    if (shift !== 0) {
+      const maxIdx = diasSemanaActiva.length - 1;
+      const to = Math.max(0, Math.min(maxIdx, drag.from + shift));
+      if (to !== drag.from) {
+        guardar({ ...data, planOverrides: moverPlanVisible(diasSemanaActiva, drag.from, to) });
+        setDrag({ from: to, y0: drag.y0 + (to - drag.from) * ROWH });
+      }
+    }
+  };
+
+  const soltarDrag = () => setDrag(null);
+
+  // ---------- calendario ----------
+  const celdas = useMemo(() => {
+    const { y, m } = mesCal;
+    const primero = new Date(y, m, 1).getDay();
+    const diasMes = new Date(y, m + 1, 0).getDate();
+    const arr = Array(primero).fill(null);
+    for (let d = 1; d <= diasMes; d++) arr.push(`${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`);
+    return arr;
+  }, [mesCal]);
+
+  // Semanas del mes REAL en curso (independiente del navegador de meses del Calendario).
+  // Al cambiar el mes real, esto se recalcula solo — sin intervención manual.
+  const ahoraReal = new Date();
+  const anioActual = ahoraReal.getFullYear();
+  const mesActual = ahoraReal.getMonth();
+  const semanasMes = useMemo(() => semanasDelMes(anioActual, mesActual), [anioActual, mesActual]);
+  const semanaActivaIdx = Math.min(semanaSel, semanasMes.length - 1);
+  const diasSemanaActiva = semanasMes[semanaActivaIdx]?.dias || [];
+
+  // Resumen simple del mes real en curso (para la tarjeta compacta de HOY)
+  const diasEnMesActual = new Date(anioActual, mesActual + 1, 0).getDate();
+  const mesActualStr = `${anioActual}-${String(mesActual + 1).padStart(2, "0")}`;
+  const entrenadosMesActual = data.diasMarcados.filter((f) => f.startsWith(mesActualStr)).length;
+
+  // Distribución por músculo en los últimos 7 días — evidencia científica sugiere
+  // frecuencia ≥2x/semana por grupo muscular para mejores resultados de fuerza/hipertrofia.
+  const distribucionMusculos = useMemo(() => {
+    const musculos = [...new Set(Object.values(data.plan))];
+    const hace7 = new Date();
+    hace7.setDate(hace7.getDate() - 6);
+    const desde7 = iso(hace7);
+    const conteo = {};
+    musculos.forEach((m) => { conteo[m] = 0; });
+    data.diasMarcados.forEach((f) => {
+      if (f >= desde7 && f <= hoyISO()) {
+        const m = obtenerMusculo(f);
+        if (conteo[m] != null) conteo[m]++;
+      }
+    });
+    return musculos.map((m) => ({ musculo: m, veces: conteo[m] })).sort((a, b) => b.veces - a.veces);
+  }, [data.plan, data.diasMarcados, data.planOverrides]);
+
+  // Duración y esfuerzo real de tus sesiones, tal como Strava las reporta.
+  const statsStrava = useMemo(() => {
+    const acts = data.stravaActividades || [];
+    const delMes = acts.filter((a) => a.fecha.startsWith(mesActualStr));
+    const totalMin = delMes.reduce((s, a) => s + (a.minutos || 0), 0);
+    const promMin = delMes.length ? Math.round(totalMin / delMes.length) : null;
+    const conEsfuerzo = delMes.filter((a) => a.esfuerzo != null);
+    const esfuerzoProm = conEsfuerzo.length ? Math.round(conEsfuerzo.reduce((s, a) => s + a.esfuerzo, 0) / conEsfuerzo.length) : null;
+    return { sesiones: delMes.length, totalMin, promMin, esfuerzoProm };
+  }, [data.stravaActividades, mesActualStr]);
+
+  if (!cargado) return <div style={{ background: "#08090B", minHeight: "100vh" }} />;
+
+  return (
+    <div className="app">
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Inter:wght@400;500;600&display=swap');
+        :root {
+          --bg: #08090B;
+          --panel: #101216;
+          --panel2: #14171C;
+          --line: #1D2127;
+          --line2: #262B33;
+          --txt: #E6E8EC;
+          --mut: #7A828E;
+          --mut2: #545C68;
+          --navy: #16233C;
+          --navy2: #1C2E4F;
+          --blue: #4C7EDB;
+          --blueHi: #6E99E8;
+          --ok: #58B08C;
+          --bad: #C97070;
+        }
+        * { box-sizing: border-box; margin: 0; }
+        .app { min-height: 100vh; background: var(--bg); color: var(--txt); font-family: 'Inter', sans-serif; padding-bottom: 92px; -webkit-font-smoothing: antialiased; }
+        .head { padding: 22px 22px 16px; border-bottom: 1px solid var(--line); }
+        .marca { font-family: 'Space Grotesk'; font-weight: 700; font-size: 20px; letter-spacing: 4px; text-transform: uppercase; }
+        .marca span { color: var(--blue); }
+        .cont { padding: 20px 22px; max-width: 560px; margin: 0 auto; }
+        .titulo { font-family: 'Space Grotesk'; font-weight: 500; font-size: 15px; letter-spacing: 2.5px; text-transform: uppercase; color: var(--mut); margin-bottom: 14px; }
+        .card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 18px; margin-bottom: 14px; }
+        .chk { width: 28px; height: 28px; border-radius: 50%; border: 1.5px solid var(--line2); background: transparent; color: #0A0E16; cursor: pointer; flex-shrink: 0; font-size: 14px; font-weight: 700; display: flex; align-items: center; justify-content: center; transition: background .12s, border-color .12s; padding: 0; }
+        .chk:hover { border-color: var(--blue); }
+        .chk.on { background: var(--blue); border-color: var(--blueHi); }
+        .chk:disabled { opacity: .25; cursor: default; }
+        .chk:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+        .handle { margin-left: auto; background: none; border: none; color: var(--mut2); font-size: 20px; cursor: grab; padding: 8px 6px 8px 12px; touch-action: none; flex-shrink: 0; }
+        .handle:active { cursor: grabbing; color: var(--blueHi); }
+        .handle:focus-visible { outline: 2px solid var(--blue); border-radius: 6px; }
+        .fila { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+        input { background: var(--bg); border: 1px solid var(--line2); color: var(--txt); border-radius: 10px; padding: 10px 12px; font-size: 15px; font-family: 'Inter'; color-scheme: dark; }
+        input[type="number"] { width: 92px; }
+        input:focus { outline: 2px solid var(--blue); border-color: transparent; }
+        .btn { background: var(--blue); color: #0A0E16; border: none; border-radius: 10px; padding: 10px 18px; font-weight: 600; font-size: 14px; cursor: pointer; font-family: 'Inter'; transition: background .15s; }
+        .btn:hover { background: var(--blueHi); }
+        .btn:focus-visible { outline: 2px solid var(--txt); }
+        .tabs { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(8,9,11,.92); backdrop-filter: blur(12px); border-top: 1px solid var(--line); display: flex; z-index: 40; }
+        .tab { flex: 1; padding: 15px 0 19px; background: none; border: none; color: var(--mut2); font-family: 'Space Grotesk'; font-weight: 500; font-size: 12px; letter-spacing: 2px; text-transform: uppercase; cursor: pointer; transition: color .15s; }
+        .tab.on { color: var(--blueHi); }
+        .tab:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+        .statGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .num { font-family: 'Space Grotesk'; font-weight: 700; font-size: 26px; color: var(--txt); line-height: 1; letter-spacing: -.5px; }
+        .numL { font-size: 10.5px; color: var(--mut2); text-transform: uppercase; letter-spacing: 1.5px; margin-top: 6px; }
+        .tip { font-size: 12.5px; color: var(--mut); line-height: 1.55; }
+        .toast { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); background: var(--navy2); color: var(--txt); border: 1px solid var(--blue); padding: 12px 18px; border-radius: 12px; font-weight: 500; font-size: 13.5px; z-index: 50; max-width: 90%; box-shadow: 0 8px 32px rgba(0,0,0,.6); }
+        .calHead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+        .calMes { font-family: 'Space Grotesk'; font-weight: 700; font-size: 16px; letter-spacing: .5px; }
+        .nav { background: none; border: 1px solid var(--line2); color: var(--txt); border-radius: 9px; width: 34px; height: 34px; cursor: pointer; font-size: 15px; transition: border-color .15s; }
+        .nav:hover { border-color: var(--blue); }
+        .calGrid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+        .calDiaL { text-align: center; font-size: 10px; color: var(--mut2); text-transform: uppercase; letter-spacing: 1px; padding: 4px 0; }
+        .celda { aspect-ratio: 1; border-radius: 10px; border: 1px solid var(--line); background: var(--panel2); color: var(--mut); font-size: 13px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-family: 'Inter'; transition: border-color .12s; }
+        .celda:hover { border-color: var(--blue); }
+        .celda:focus-visible { outline: 2px solid var(--blue); }
+        .celda.marcado { background: var(--blue); color: #0A0E16; font-weight: 600; border-color: var(--blueHi); }
+        .celda.esHoy { box-shadow: inset 0 0 0 1.5px var(--txt); }
+        .celda.futuro { opacity: .55; cursor: default; }
+        .celda.vacia { visibility: hidden; }
+        .semChips { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 14px; scrollbar-width: none; }
+        .semChips::-webkit-scrollbar { display: none; }
+        .semChip { flex-shrink: 0; width: 54px; height: 54px; border-radius: 12px; border: 1px solid var(--line2); background: var(--panel2); color: var(--mut); display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: pointer; font-family: 'Space Grotesk'; transition: border-color .12s, background .12s; }
+        .semChip .semChipL { font-size: 8.5px; letter-spacing: 1px; color: var(--mut2); }
+        .semChip .semChipN { font-size: 19px; font-weight: 700; line-height: 1.1; }
+        .semChip.on { background: var(--blue); border-color: var(--blueHi); color: #0A0E16; }
+        .semChip.on .semChipL { color: rgba(10,14,22,.65); }
+        .semChip:hover { border-color: var(--blue); }
+        .semChip:focus-visible { outline: 2px solid var(--blue); }
+        .semSemanaSub { font-size: 12px; color: var(--mut); margin-bottom: 8px; text-transform: capitalize; }
+        .semDiaRow { display: flex; align-items: center; gap: 12px; border-top: 1px solid var(--line); height: 56px; font-size: 13.5px; }
+        .semDiaRow:first-of-type { border-top: none; }
+        .semDiaRow.dragging { background: var(--navy); border-radius: 12px; border-top-color: transparent; }
+        .semDiaRow.dragging + .semDiaRow { border-top-color: transparent; }
+        .semDiaFecha { width: 56px; flex-shrink: 0; font-size: 11px; color: var(--mut2); text-transform: capitalize; }
+        .semDiaTexto { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; background: none; border: none; color: var(--txt); font-size: 13.5px; font-family: 'Inter'; cursor: pointer; padding: 4px 0; }
+        .semDiaTexto:hover { color: var(--blueHi); }
+        .semDiaTexto:focus-visible { outline: 2px solid var(--blue); border-radius: 4px; }
+        .editMusculo { flex: 1; min-width: 0; font-size: 13.5px; padding: 6px 8px; }
+        .mesRow { border-top: 1px solid var(--line); padding: 12px 0; }
+        .mesRow:first-of-type { border-top: none; padding-top: 2px; }
+        .mesTop { display: flex; align-items: baseline; gap: 10px; font-size: 13.5px; }
+        .mesNombre { font-family: 'Space Grotesk'; font-weight: 700; font-size: 14px; width: 62px; flex-shrink: 0; text-transform: capitalize; }
+        .mesDias { color: var(--blueHi); font-weight: 600; white-space: nowrap; margin-left: auto; }
+        .mesBarra { margin-top: 8px; height: 5px; border-radius: 3px; background: var(--panel2); overflow: hidden; }
+        .mesBarraFill { height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--navy2), var(--blue)); transition: width .3s; }
+        .btnStrava { width: 100%; background: #FC4C02; color: #fff; border: none; border-radius: 11px; padding: 13px; font-family: 'Space Grotesk'; font-weight: 700; font-size: 14px; letter-spacing: .3px; cursor: pointer; transition: background .15s; margin-bottom: 14px; }
+        .btnStrava:hover { background: #E34400; }
+        .btnStrava:focus-visible { outline: 2px solid #fff; }
+        .stravaFila { display: flex; align-items: center; gap: 12px; padding: 14px 16px; }
+        .stravaDot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); flex-shrink: 0; }
+        .stravaDot.sync { background: var(--blueHi); animation: pulso 1s ease-in-out infinite; }
+        @keyframes pulso { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+        .btnMini { background: none; border: 1px solid var(--line2); color: var(--mut); width: 32px; height: 32px; border-radius: 9px; cursor: pointer; font-size: 15px; flex-shrink: 0; }
+        .btnMini:hover { border-color: var(--blue); color: var(--blueHi); }
+        .btnMini:disabled { opacity: .4; cursor: default; }
+        .btnMini:focus-visible { outline: 2px solid var(--blue); }
+        .btnDrive { width: 100%; background: var(--panel2); color: var(--txt); border: 1px solid var(--line2); border-radius: 11px; padding: 12px; font-family: 'Space Grotesk'; font-weight: 600; font-size: 13.5px; cursor: pointer; margin-bottom: 14px; transition: border-color .15s; }
+        .btnDrive:hover { border-color: #4285F4; }
+        .btnDrive:disabled { opacity: .6; cursor: default; }
+        .btnDrive:focus-visible { outline: 2px solid #4285F4; }
+        .muscRow { display: flex; align-items: center; gap: 10px; border-top: 1px solid var(--line); padding: 10px 0; font-size: 13.5px; }
+        .muscRow:first-of-type { border-top: none; padding-top: 2px; }
+        .muscDot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+        .muscDot.ok { background: var(--ok); }
+        .muscDot.med { background: #D9A441; }
+        .muscDot.bajo { background: var(--mut2); }
+        .muscVeces { color: var(--mut); font-size: 12px; flex-shrink: 0; }
+        @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+      `}</style>
+
+      {mensaje && <div className="toast" role="status">{mensaje}</div>}
+
+      <header className="head">
+        <div className="marca">Modo <span>Bestia</span></div>
+      </header>
+
+      <main className="cont">
+        {/* ================= HOY ================= */}
+        {tab === "hoy" && (
+          <>
+            {!data.strava.refreshToken ? (
+              <button className="btnStrava" onClick={conectarStrava}>Conectar con Strava</button>
+            ) : (
+              <div className="card stravaFila">
+                <span className={`stravaDot ${sincronizando ? "sync" : ""}`} />
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{sincronizando ? "Sincronizando…" : "Conectado a Strava"}</div>
+                  <div className="tip">{data.strava.ultimaSync ? fechaHoraCorta(data.strava.ultimaSync) : "Aún sin sincronizar"}</div>
+                </span>
+                <button className="btnMini" aria-label="sincronizar ahora" disabled={sincronizando} onClick={() => sincronizarStrava()}>⟳</button>
+                <button className="btnMini" aria-label="desconectar Strava" onClick={desconectarStrava}>✕</button>
+              </div>
+            )}
+
+            <button className="btnDrive" disabled={guardandoDrive} onClick={guardarEnGDrive}>
+              {guardandoDrive ? "Guardando…" : gdriveClientId ? "Guardar en Google Drive" : "Conectar con Google Drive"}
+            </button>
+            {configurandoDrive && (
+              <div className="card">
+                <div className="numL" style={{ marginBottom: 10, marginTop: 0 }}>Conectar con Google Drive</div>
+                <p className="tip" style={{ marginBottom: 10 }}>Pega tu ID de cliente de Google (ve la guía de configuración):</p>
+                <div className="fila">
+                  <input type="text" placeholder="xxxxx.apps.googleusercontent.com" aria-label="ID de cliente de Google"
+                    value={gdriveInput} onChange={(e) => setGdriveInput(e.target.value)} style={{ flex: 1, minWidth: 120 }} />
+                  <button className="btn" onClick={guardarGDriveClientId}>Guardar</button>
+                </div>
+              </div>
+            )}
+
+            <div className="card" style={{ textAlign: "center" }}>
+              <div className="num" style={{ fontSize: 38 }}>
+                {entrenadosMesActual}<span style={{ color: "var(--mut2)", fontSize: 20 }}> / {diasEnMesActual}</span>
+              </div>
+              <div className="numL">Días entrenados este mes</div>
+            </div>
+
+            <h2 className="titulo" style={{ marginTop: 4 }}>Semanas de entrenamiento {MESES[mesActual]}</h2>
+            <div className="card">
+              <div className="semChips">
+                {semanasMes.map((s, i) => (
+                  <button key={i} className={`semChip ${i === semanaActivaIdx ? "on" : ""}`} onClick={() => setSemanaSel(i)}>
+                    <span className="semChipL">SEM</span>
+                    <span className="semChipN">{i + 1}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="card">
+              <div className="semSemanaSub">
+                {diaCorta(diasSemanaActiva[0])} – {diaCorta(diasSemanaActiva[diasSemanaActiva.length - 1])} · toca el músculo para editarlo · desliza ≡ para mover un día
+              </div>
+              {diasSemanaActiva.map((fecha, i) => {
+                const weekday = new Date(fecha + "T12:00:00").getDay();
+                const musculo = obtenerMusculo(fecha);
+                const marcado = data.diasMarcados.includes(fecha);
+                const editando = editandoDia === fecha;
+                return (
+                  <div key={fecha} className={`semDiaRow ${drag && drag.from === i ? "dragging" : ""}`}>
+                    <span className={`chk ${marcado ? "on" : ""}`} aria-hidden="true">{marcado ? "✓" : ""}</span>
+                    <span className="semDiaFecha">{diaCorta(fecha)}</span>
+                    {editando ? (
+                      <>
+                        <input
+                          className="editMusculo"
+                          value={editandoTexto}
+                          onChange={(e) => setEditandoTexto(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") guardarMusculoDia(fecha, weekday, editandoTexto); if (e.key === "Escape") setEditandoDia(null); }}
+                          autoFocus
+                          aria-label={`editar músculo de ${diaCorta(fecha)}`}
+                        />
+                        <button className="btnMini" aria-label="guardar músculo" onClick={() => guardarMusculoDia(fecha, weekday, editandoTexto)}>✓</button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          className="semDiaTexto"
+                          onClick={() => { setEditandoDia(fecha); setEditandoTexto(musculo); }}
+                          aria-label={`editar músculo de ${diaCorta(fecha)}, actualmente ${musculo}`}>
+                          {musculo}
+                        </button>
+                        <button
+                          className="handle"
+                          onPointerDown={iniciarDrag(i)}
+                          onPointerMove={moverDrag}
+                          onPointerUp={soltarDrag}
+                          onPointerCancel={soltarDrag}
+                          aria-label={`mover ${musculo} a otro día`}>≡</button>
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+
+        {/* ================= CALENDARIO ================= */}
+        {tab === "progreso" && (
+          <>
+            <h2 className="titulo">Calendario</h2>
+
+            <div className="card">
+              <div className="calHead">
+                <button className="nav" aria-label="mes anterior" onClick={() => setMesCal(({ y, m }) => m === 0 ? { y: y - 1, m: 11 } : { y, m: m - 1 })}>‹</button>
+                <div className="calMes">{MESES[mesCal.m]} {mesCal.y}</div>
+                <button className="nav" aria-label="mes siguiente" onClick={() => setMesCal(({ y, m }) => m === 11 ? { y: y + 1, m: 0 } : { y, m: m + 1 })}>›</button>
+              </div>
+              <div className="calGrid">
+                {["D", "L", "M", "M", "J", "V", "S"].map((l, i) => <div className="calDiaL" key={i}>{l}</div>)}
+                {celdas.map((f, i) => f === null
+                  ? <div className="celda vacia" key={i} />
+                  : (
+                    <button key={f}
+                      className={`celda ${data.diasMarcados.includes(f) ? "marcado" : ""} ${f === hoyISO() ? "esHoy" : ""} ${f > hoyISO() ? "futuro" : ""}`}
+                      onClick={() => toggleDiaCal(f)}
+                      aria-label={`${f}${data.diasMarcados.includes(f) ? ", entrenado" : ""}`}>
+                      {parseInt(f.slice(-2), 10)}
+                    </button>
+                  ))}
+              </div>
+              <div className="tip" style={{ marginTop: 12 }}>
+                Toca cualquier día para marcarlo o corregirlo · <strong style={{ color: "var(--blueHi)" }}>{rachas.esteMes} días</strong> entrenados en {MESES[mesCal.m]}.
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* ================= ESTADÍSTICAS ================= */}
+        {tab === "stats" && (
+          <>
+            <h2 className="titulo">Estadísticas</h2>
+
+            <div className="card">
+              <div className="numL" style={{ marginBottom: 12, marginTop: 0 }}>Tu regreso en números</div>
+              <div className="statGrid">
+                <div>
+                  <div className="num">{estad.ritmo != null ? estad.ritmo.toFixed(1) : "—"}</div>
+                  <div className="numL">Días / semana en promedio</div>
+                </div>
+                <div>
+                  <div className="num">{estad.constancia != null ? Math.round(estad.constancia) + "%" : "—"}</div>
+                  <div className="numL">Constancia desde el inicio</div>
+                </div>
+              </div>
+              <div className="statGrid" style={{ marginTop: 16 }}>
+                <div>
+                  <div className="num" style={{ fontSize: 20 }}>{estad.mejorMes ? `${mesLabel(estad.mejorMes.mes)} · ${estad.mejorMes.dias}` : "—"}</div>
+                  <div className="numL">Mejor mes (días entrenados)</div>
+                </div>
+                <div>
+                  <div className="num" style={{ fontSize: 20 }}>{rachas.mejor}</div>
+                  <div className="numL">Mejor racha</div>
+                </div>
+              </div>
+              {estad.diasDesde != null && (
+                <div className="tip" style={{ marginTop: 14 }}>
+                  Llevas <strong style={{ color: "var(--blueHi)" }}>{estad.diasDesde} días</strong> desde tu primer entrenamiento registrado, con <strong style={{ color: "var(--blueHi)" }}>{data.diasMarcados.length} sesiones</strong> en total.
+                </div>
+              )}
+            </div>
+
+            <div className="card">
+              <div className="statGrid">
+                <div>
+                  <div className="num" style={{ fontSize: 22 }}>{estad.mejorSemana ? `${estad.mejorSemana.dias}x` : "—"}</div>
+                  <div className="numL">Mejor semana{estad.mejorSemana ? ` · desde ${fechaCorta(estad.mejorSemana.inicio)}` : ""}</div>
+                </div>
+                <div>
+                  <div className="num" style={{ fontSize: 22 }}>{estad.diaConstante ? `${estad.diaConstante.pct}%` : "—"}</div>
+                  <div className="numL">Tu día más constante{estad.diaConstante ? `: ${DIAS[estad.diaConstante.dia]}` : ""}</div>
+                </div>
+              </div>
+              <div className="tip" style={{ marginTop: 14 }}>
+                La constancia por día muestra qué tan seguido cumples ese día específico cada semana. El descanso adecuado entre sesiones es tan importante como entrenar — evita el sobreentrenamiento.
+              </div>
+            </div>
+
+            <div className="card">
+              <div className="numL" style={{ marginBottom: 4, marginTop: 0 }}>Distribución por músculo · últimos 7 días</div>
+              <div className="tip" style={{ marginBottom: 12 }}>La evidencia sugiere al menos 2x por semana por grupo muscular para mejores resultados.</div>
+              {distribucionMusculos.map((d) => (
+                <div className="muscRow" key={d.musculo}>
+                  <span className={`muscDot ${d.veces >= 2 ? "ok" : d.veces === 1 ? "med" : "bajo"}`} />
+                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{d.musculo}</span>
+                  <span className="muscVeces">{d.veces}x</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="card">
+              <div className="numL" style={{ marginBottom: 12, marginTop: 0 }}>Entrenamiento este mes (Strava)</div>
+              <div className="statGrid">
+                <div><div className="num">{statsStrava.sesiones}</div><div className="numL">Sesiones sincronizadas</div></div>
+                <div><div className="num">{statsStrava.totalMin ? `${Math.floor(statsStrava.totalMin / 60)}h ${statsStrava.totalMin % 60}m` : "—"}</div><div className="numL">Tiempo total</div></div>
+              </div>
+              {(statsStrava.promMin != null || statsStrava.esfuerzoProm != null) && (
+                <div className="statGrid" style={{ marginTop: 16 }}>
+                  <div><div className="num" style={{ fontSize: 20 }}>{statsStrava.promMin != null ? `${statsStrava.promMin} min` : "—"}</div><div className="numL">Duración promedio</div></div>
+                  <div><div className="num" style={{ fontSize: 20 }}>{statsStrava.esfuerzoProm != null ? statsStrava.esfuerzoProm : "—"}</div><div className="numL">Esfuerzo relativo prom.</div></div>
+                </div>
+              )}
+            </div>
+
+            <div className="card">
+              <div className="numL" style={{ marginBottom: 12, marginTop: 0 }}>Mes a mes</div>
+              {estad.porMes.length === 0 && <div className="tip">Marca tu primer día — aquí se escribirá tu historia mes a mes.</div>}
+              {[...estad.porMes].reverse().map((m) => (
+                <div className="mesRow" key={m.mes}>
+                  <div className="mesTop">
+                    <span className="mesNombre">{mesLabel(m.mes)}</span>
+                    <span className="mesDias">{m.dias} {m.dias === 1 ? "día" : "días"}</span>
+                  </div>
+                  <div className="mesBarra"><div className="mesBarraFill" style={{ width: `${(m.dias / estad.maxDias) * 100}%` }} /></div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+      </main>
+
+      <nav className="tabs" aria-label="secciones">
+        {[["hoy", "Hoy"], ["progreso", "Calendario"], ["stats", "Estadísticas"]].map(([k, l]) => (
+          <button key={k} className={`tab ${tab === k ? "on" : ""}`} onClick={() => setTab(k)}>{l}</button>
+        ))}
+      </nav>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<ErrorBoundary><ModoBestia /></ErrorBoundary>);
+
+  </script>
+</body>
+</html>
