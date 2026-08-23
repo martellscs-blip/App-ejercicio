@@ -141,7 +141,7 @@ function semanasDelMes(anio, mes) {
 
 function ModoBestia() {
   const [tab, setTab] = useState("hoy");
-  const [data, setData] = useState({ diasMarcados: [], plan: PLAN_DEFAULT, planVersion: PLAN_VERSION, planOverrides: {}, strava: { accessToken: null, refreshToken: null, expiresAt: null, ultimaSync: null }, stravaActividades: [] });
+  const [data, setData] = useState({ diasMarcados: [], diasExcluidos: [], plan: PLAN_DEFAULT, planVersion: PLAN_VERSION, planOverrides: {}, strava: { accessToken: null, refreshToken: null, expiresAt: null, ultimaSync: null }, stravaActividades: [] });
   const [drag, setDrag] = useState(null); // {from, y0} para reordenar la semana
   const [cargado, setCargado] = useState(false);
   const [mensaje, setMensaje] = useState(null);
@@ -192,6 +192,7 @@ function ModoBestia() {
           const planFinal = versionGuardada < PLAN_VERSION ? { ...PLAN_DEFAULT } : { ...PLAN_DEFAULT, ...(d.plan || {}) };
           dataInicial = {
             diasMarcados: d.diasMarcados || [],
+            diasExcluidos: Array.isArray(d.diasExcluidos) ? d.diasExcluidos : [],
             plan: planFinal,
             planVersion: PLAN_VERSION,
             planOverrides: d.planOverrides && typeof d.planOverrides === "object" ? d.planOverrides : {},
@@ -205,7 +206,7 @@ function ModoBestia() {
       const codeParam = new URLSearchParams(window.location.search).get("code");
       if (codeParam) {
         window.history.replaceState(null, "", window.location.pathname);
-        if (!dataInicial) dataInicial = { diasMarcados: [], plan: { ...PLAN_DEFAULT }, planVersion: PLAN_VERSION, planOverrides: {}, strava: { accessToken: null, refreshToken: null, expiresAt: null, ultimaSync: null }, stravaActividades: [] };
+        if (!dataInicial) dataInicial = { diasMarcados: [], diasExcluidos: [], plan: { ...PLAN_DEFAULT }, planVersion: PLAN_VERSION, planOverrides: {}, strava: { accessToken: null, refreshToken: null, expiresAt: null, ultimaSync: null }, stravaActividades: [] };
         setMensaje("Conectando con Strava...");
         setData(dataInicial);
         setCargado(true);
@@ -312,10 +313,16 @@ function ModoBestia() {
   // ---------- acciones ----------
   const toggleDiaCal = async (fecha) => {
     if (fecha > hoyISO()) return;
-    const marcados = data.diasMarcados.includes(fecha)
+    const marcadoActualmente = data.diasMarcados.includes(fecha);
+    const marcados = marcadoActualmente
       ? data.diasMarcados.filter((f) => f !== fecha)
       : [...data.diasMarcados, fecha];
-    await guardar({ ...data, diasMarcados: marcados });
+    // Si apagas un día a mano, que Strava no lo vuelva a encender solo en el próximo sync.
+    // Si lo vuelves a encender tú, deja de estar excluido.
+    const excluidos = marcadoActualmente
+      ? [...new Set([...(data.diasExcluidos || []), fecha])]
+      : (data.diasExcluidos || []).filter((f) => f !== fecha);
+    await guardar({ ...data, diasMarcados: marcados, diasExcluidos: excluidos });
   };
 
   const guardarMusculoDia = async (fecha, weekday, texto) => {
@@ -428,7 +435,8 @@ function ModoBestia() {
 
       const fechasFuerza = actsFuerza
         .map((a) => fechaLocalDeActividad(a))
-        .filter(Boolean);
+        .filter(Boolean)
+        .filter((f) => !(base.diasExcluidos || []).includes(f));
 
       // Guarda duración y esfuerzo (si Strava lo reporta) por actividad, sin duplicar por id.
       const nuevasDetalladas = actsFuerza.map((a) => ({
