@@ -372,6 +372,20 @@ function ModoBestia() {
   // trae actividades nuevas de fuerza — todo en silencio. Solo marca los DÍAS
   // (diasMarcados, la misma fuente que racha/estadísticas); el MÚSCULO mostrado
   // sigue viniendo de tu plan (Strava no sabe qué músculo entrenaste).
+  // Calcula la fecha LOCAL real de una actividad usando utc_offset (segundos que
+  // reporta Strava). Es más confiable que confiar en el texto de start_date_local,
+  // que a veces viene mal formado y puede correr la fecha al día siguiente o anterior.
+  const fechaLocalDeActividad = (a) => {
+    if (typeof a.start_date === "string" && typeof a.utc_offset === "number") {
+      const utcMs = new Date(a.start_date).getTime();
+      const localMs = utcMs + a.utc_offset * 1000;
+      const d = new Date(localMs);
+      return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+    }
+    return (a.start_date_local || a.start_date || "").slice(0, 10);
+  };
+
+
   const sincronizarStrava = async (dataBase) => {
     const base = dataBase || data;
     if (!base.strava || !base.strava.refreshToken) return;
@@ -413,13 +427,13 @@ function ModoBestia() {
         .filter((a) => STRAVA_TIPOS_FUERZA.includes(a.type || a.sport_type));
 
       const fechasFuerza = actsFuerza
-        .map((a) => (a.start_date_local || a.start_date || "").slice(0, 10))
+        .map((a) => fechaLocalDeActividad(a))
         .filter(Boolean);
 
       // Guarda duración y esfuerzo (si Strava lo reporta) por actividad, sin duplicar por id.
       const nuevasDetalladas = actsFuerza.map((a) => ({
         id: a.id,
-        fecha: (a.start_date_local || a.start_date || "").slice(0, 10),
+        fecha: fechaLocalDeActividad(a),
         minutos: a.moving_time ? Math.round(a.moving_time / 60) : null,
         esfuerzo: typeof a.suffer_score === "number" ? a.suffer_score : null,
         hr: typeof a.average_heartrate === "number" ? Math.round(a.average_heartrate) : null,
