@@ -74,7 +74,7 @@ const PLAN_VERSION = 2;
 
 // ============ STRAVA — misma app que ya usa Runner (mismo dominio, mismo Client ID) ============
 const STRAVA_CLIENT_ID = "273128";
-const STRAVA_CLIENT_SECRET = "d6c812b645e4d0c62d0587c3cc2f4b0cdbd28c55";
+const STRAVA_CLIENT_SECRET = "4d5b318c81f77f5705d235d4404ac0e6eb408003";
 // Tipos de actividad de Strava que cuentan como entrenamiento de fuerza.
 // Se excluye a propósito: Run, Ride, Swim, Walk, Hike (esos ya los sigues en Runner).
 const STRAVA_TIPOS_FUERZA = ["WeightTraining", "Workout", "Crossfit"];
@@ -141,7 +141,7 @@ function semanasDelMes(anio, mes) {
 
 function ModoBestia() {
   const [tab, setTab] = useState("hoy");
-  const [data, setData] = useState({ diasMarcados: [], diasExcluidos: [], plan: PLAN_DEFAULT, planVersion: PLAN_VERSION, planOverrides: {}, strava: { accessToken: null, refreshToken: null, expiresAt: null, ultimaSync: null }, stravaActividades: [] });
+  const [data, setData] = useState({ diasMarcados: [], diasExcluidos: [], plan: PLAN_DEFAULT, planVersion: PLAN_VERSION, planOverrides: {}, strava: { accessToken: null, refreshToken: null, expiresAt: null, ultimaSync: null }, stravaActividades: [], gdriveUltimoBackup: null });
   const [drag, setDrag] = useState(null); // {from, y0} para reordenar la semana
   const [cargado, setCargado] = useState(false);
   const [mensaje, setMensaje] = useState(null);
@@ -159,6 +159,7 @@ function ModoBestia() {
   const [configurandoDrive, setConfigurandoDrive] = useState(false);
   const [gdriveInput, setGdriveInput] = useState("");
   const [guardandoDrive, setGuardandoDrive] = useState(false);
+  const [restaurandoDrive, setRestaurandoDrive] = useState(false);
   const [actualizandoApp, setActualizandoApp] = useState(false);
   const [githubToken, setGithubToken] = useState(() => {
     try { return localStorage.getItem("github_pat") || ""; } catch (e) { return ""; }
@@ -198,6 +199,7 @@ function ModoBestia() {
             planOverrides: d.planOverrides && typeof d.planOverrides === "object" ? d.planOverrides : {},
             strava: d.strava && typeof d.strava === "object" ? d.strava : { accessToken: null, refreshToken: null, expiresAt: null, ultimaSync: null },
             stravaActividades: Array.isArray(d.stravaActividades) ? d.stravaActividades : [],
+            gdriveUltimoBackup: d.gdriveUltimoBackup || null,
           };
         }
       } catch (e) { /* primera vez */ }
@@ -206,7 +208,7 @@ function ModoBestia() {
       const codeParam = new URLSearchParams(window.location.search).get("code");
       if (codeParam) {
         window.history.replaceState(null, "", window.location.pathname);
-        if (!dataInicial) dataInicial = { diasMarcados: [], diasExcluidos: [], plan: { ...PLAN_DEFAULT }, planVersion: PLAN_VERSION, planOverrides: {}, strava: { accessToken: null, refreshToken: null, expiresAt: null, ultimaSync: null }, stravaActividades: [] };
+        if (!dataInicial) dataInicial = { diasMarcados: [], diasExcluidos: [], plan: { ...PLAN_DEFAULT }, planVersion: PLAN_VERSION, planOverrides: {}, strava: { accessToken: null, refreshToken: null, expiresAt: null, ultimaSync: null }, stravaActividades: [], gdriveUltimoBackup: null };
         setMensaje("Conectando con Strava...");
         setData(dataInicial);
         setCargado(true);
@@ -227,7 +229,11 @@ function ModoBestia() {
   const guardar = async (nueva) => {
     setData(nueva);
     try { await storage.set(STORAGE_KEY, JSON.stringify(nueva)); }
-    catch (e) { console.error("No se pudo guardar", e); }
+    catch (e) {
+      console.error("No se pudo guardar", e);
+      setMensaje("No se pudo guardar el cambio en este dispositivo.");
+      setTimeout(() => setMensaje(null), 4000);
+    }
   };
 
   // ---------- rachas ----------
@@ -456,8 +462,9 @@ function ModoBestia() {
         strava: { accessToken, refreshToken, expiresAt, ultimaSync: new Date().toISOString() },
       };
       await guardar(nuevo);
-      if (fechasFuerza.length) {
-        setMensaje(`Strava sincronizado: ${fechasFuerza.length} entrenamiento${fechasFuerza.length === 1 ? "" : "s"} de fuerza detectado${fechasFuerza.length === 1 ? "" : "s"}.`);
+      const diasNuevos = fechasFuerza.filter((f) => !base.diasMarcados.includes(f));
+      if (diasNuevos.length) {
+        setMensaje(`Strava sincronizado: ${diasNuevos.length} entrenamiento${diasNuevos.length === 1 ? "" : "s"} de fuerza detectado${diasNuevos.length === 1 ? "" : "s"}.`);
         setTimeout(() => setMensaje(null), 5000);
       }
     } catch (e) {
@@ -552,8 +559,11 @@ function ModoBestia() {
     try {
       setMensaje("Conectando con Google…");
       const token = await getGDriveToken(gdriveClientId);
-      const json = JSON.stringify({ app: "MODO BESTIA", version: 1, exportado: new Date().toISOString(), datos: data }, null, 2);
+      const ahora = new Date().toISOString();
+      const nuevo = { ...data, gdriveUltimoBackup: ahora };
+      const json = JSON.stringify({ app: "MODO BESTIA", version: 1, exportado: ahora, datos: nuevo }, null, 2);
       await subirArchivoADrive(token, json);
+      await guardar(nuevo);
       setMensaje("Respaldo guardado en Google Drive.");
     } catch (err) {
       if (!(err && err.message === "popup_cerrado")) {
@@ -564,6 +574,60 @@ function ModoBestia() {
     } finally {
       setGuardandoDrive(false);
       setTimeout(() => setMensaje(null), 4000);
+    }
+  };
+
+  // Trae el respaldo guardado en Drive y reemplaza los datos actuales de la app.
+  // Pide confirmación porque es una acción destructiva sobre lo que hay ahora.
+  const restaurarDeGDrive = async () => {
+    if (!gdriveClientId) { setGdriveInput(""); setConfigurandoDrive(true); return; }
+    const confirmado = window.confirm("Esto reemplaza los datos actuales de la app con lo último que hayas guardado en Google Drive. ¿Continuar?");
+    if (!confirmado) return;
+    setRestaurandoDrive(true);
+    try {
+      setMensaje("Conectando con Google…");
+      const token = await getGDriveToken(gdriveClientId);
+      const q = encodeURIComponent(`name='${GDRIVE_NOMBRE_ARCHIVO}' and trashed=false`);
+      const buscar = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,name)`, {
+        headers: { Authorization: "Bearer " + token },
+      });
+      if (!buscar.ok) throw new Error("No se pudo consultar Google Drive");
+      const encontrados = await buscar.json();
+      const existente = encontrados.files && encontrados.files[0];
+      if (!existente) throw new Error("No hay ningún respaldo guardado todavía en Drive.");
+
+      const descarga = await fetch(`https://www.googleapis.com/drive/v3/files/${existente.id}?alt=media`, {
+        headers: { Authorization: "Bearer " + token },
+      });
+      if (!descarga.ok) throw new Error("No se pudo descargar el respaldo.");
+      const texto = await descarga.text();
+      const obj = JSON.parse(texto);
+      const d = obj.datos || obj;
+      if (!d || !Array.isArray(d.diasMarcados)) throw new Error("El respaldo no tiene un formato válido.");
+
+      const versionGuardada = d.planVersion || 0;
+      const planFinal = versionGuardada < PLAN_VERSION ? { ...PLAN_DEFAULT } : { ...PLAN_DEFAULT, ...(d.plan || {}) };
+      const restaurado = {
+        diasMarcados: d.diasMarcados || [],
+        diasExcluidos: Array.isArray(d.diasExcluidos) ? d.diasExcluidos : [],
+        plan: planFinal,
+        planVersion: PLAN_VERSION,
+        planOverrides: d.planOverrides && typeof d.planOverrides === "object" ? d.planOverrides : {},
+        strava: d.strava && typeof d.strava === "object" ? d.strava : { accessToken: null, refreshToken: null, expiresAt: null, ultimaSync: null },
+        stravaActividades: Array.isArray(d.stravaActividades) ? d.stravaActividades : [],
+        gdriveUltimoBackup: d.gdriveUltimoBackup || null,
+      };
+      await guardar(restaurado);
+      setMensaje("Datos restaurados desde Google Drive.");
+    } catch (err) {
+      if (!(err && err.message === "popup_cerrado")) {
+        setMensaje(err && err.message ? err.message : "No se pudo restaurar desde Drive.");
+      } else {
+        setMensaje(null);
+      }
+    } finally {
+      setRestaurandoDrive(false);
+      setTimeout(() => setMensaje(null), 5000);
     }
   };
 
@@ -724,7 +788,8 @@ function ModoBestia() {
   // Distribución por músculo en los últimos 7 días — evidencia científica sugiere
   // frecuencia ≥2x/semana por grupo muscular para mejores resultados de fuerza/hipertrofia.
   const distribucionMusculos = useMemo(() => {
-    const musculos = [...new Set(Object.values(data.plan))];
+    const NO_MUSCULO = ["cardio", "descanso"];
+    const musculos = [...new Set(Object.values(data.plan))].filter((m) => !NO_MUSCULO.includes(String(m).trim().toLowerCase()));
     const hace7 = new Date();
     hace7.setDate(hace7.getDate() - 6);
     const desde7 = iso(hace7);
@@ -872,10 +937,6 @@ function ModoBestia() {
         .btnMini:hover { border-color: var(--blue); color: var(--blueHi); }
         .btnMini:disabled { opacity: .4; cursor: default; }
         .btnMini:focus-visible { outline: 2px solid var(--blue); }
-        .btnDrive { width: 100%; background: var(--panel2); color: var(--txt); border: 1px solid var(--line2); border-radius: 11px; padding: 12px; font-family: 'Space Grotesk'; font-weight: 600; font-size: 13.5px; cursor: pointer; margin-bottom: 14px; transition: border-color .15s; }
-        .btnDrive:hover { border-color: #4285F4; }
-        .btnDrive:disabled { opacity: .6; cursor: default; }
-        .btnDrive:focus-visible { outline: 2px solid #4285F4; }
         .muscRow { display: flex; align-items: center; gap: 10px; border-top: 1px solid var(--line); padding: 10px 0; font-size: 13.5px; }
         .muscRow:first-of-type { border-top: none; padding-top: 2px; }
         .muscDot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
@@ -957,9 +1018,17 @@ function ModoBestia() {
               </div>
             )}
 
-            <button className="btnDrive" disabled={guardandoDrive} onClick={guardarEnGDrive}>
-              {guardandoDrive ? "Guardando…" : gdriveClientId ? "Guardar en Google Drive" : "Conectar con Google Drive"}
-            </button>
+            <div className="card stravaFila">
+              <span className="stravaDot" style={{ background: "#4285F4" }} />
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>
+                  {guardandoDrive ? "Guardando en Drive…" : restaurandoDrive ? "Restaurando…" : "Google Drive"}
+                </div>
+                <div className="tip">{data.gdriveUltimoBackup ? `Último respaldo: ${fechaHoraCorta(data.gdriveUltimoBackup)}` : "Aún sin respaldar"}</div>
+              </span>
+              <button className="btnMini" aria-label="guardar en Google Drive" disabled={guardandoDrive || restaurandoDrive} onClick={guardarEnGDrive}>⬆</button>
+              <button className="btnMini" aria-label="restaurar desde Google Drive" disabled={guardandoDrive || restaurandoDrive} onClick={restaurarDeGDrive}>⬇</button>
+            </div>
             {configurandoDrive && (
               <div className="card">
                 <div className="numL" style={{ marginBottom: 10, marginTop: 0 }}>Conectar con Google Drive</div>
@@ -1021,7 +1090,7 @@ function ModoBestia() {
                         <button
                           className="semDiaTexto"
                           onClick={() => { setEditandoDia(fecha); setEditandoTexto(musculo); }}
-                          aria-label={`editar músculo de ${diaCorta(fecha)}, actualmente ${musculo}`}>
+                          aria-label={`${diaCorta(fecha)}, ${marcado ? "entrenado" : "sin entrenar"}, actualmente ${musculo}, toca para editar`}>
                           {musculo}
                         </button>
                         <button
